@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Model = require('../dist/habit-model.js');
+const { emptyState, liaState } = require('../server/default-state.js');
 global.HabitModel = Model;
 const Stats = require('../dist/habit-stats.js');
 
@@ -12,8 +13,20 @@ const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 test('a new account starts with an empty valid tracker', () => {
   const state = Model.init([], START);
   assert.equal(state.version, 5);
+  assert.equal(state.startDateChosen, true);
   assert.deepEqual(state.habits, []);
   assert.deepEqual(Model.sanitize(state, []), state);
+});
+
+test('start-date onboarding is explicit and legacy states keep their existing date', () => {
+  const pending = { ...Model.init([], START), startDateChosen: false };
+  assert.equal(Model.sanitize(pending, []).startDateChosen, false);
+
+  const legacy = Model.init([], START);
+  delete legacy.startDateChosen;
+  assert.equal(Model.sanitize(legacy, []).startDateChosen, true);
+  assert.equal(emptyState().startDateChosen, false);
+  assert.equal(liaState().startDateChosen, true);
 });
 
 test('a new user can add the first custom habit', () => {

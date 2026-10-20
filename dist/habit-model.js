@@ -67,7 +67,7 @@
         endDate: null
       };
     });
-    return { version: 5, start, habits, entries: {}, reflections: {} };
+    return { version: 5, start, startDateChosen: true, habits, entries: {}, reflections: {} };
   }
 
   function readLegacyHabits(loaded, seeds, groups) {
@@ -184,6 +184,9 @@
       return {
         version: 5,
         start: loaded.start,
+        // States created before the onboarding screen already had a working
+        // start date, so only an explicit false means it still needs choosing.
+        startDateChosen: loaded.startDateChosen !== false,
         habits,
         entries: readEntries(loaded.entries, knownIds),
         reflections

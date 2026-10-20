@@ -895,6 +895,8 @@ function sanitize_state(mixed $state): ?array
     return [
         'version' => 5,
         'start' => $state['start'],
+        // Existing states without this field keep their established start.
+        'startDateChosen' => (bool)($state['startDateChosen'] ?? true),
         'habits' => $habits,
         'entries' => $entries === [] ? new stdClass() : $entries,
         'reflections' => $reflections === [] ? new stdClass() : $reflections,
@@ -925,6 +927,7 @@ function empty_state(): array
     return [
         'version' => 5,
         'start' => date('Y-m-d'),
+        'startDateChosen' => false,
         'habits' => [],
         'entries' => new stdClass(),
         'reflections' => new stdClass(),
@@ -970,6 +973,7 @@ function lia_state(): array
     return [
         'version' => 5,
         'start' => date('Y-m-d'),
+        'startDateChosen' => true,
         'habits' => $habits,
         'entries' => new stdClass(),
         'reflections' => new stdClass(),

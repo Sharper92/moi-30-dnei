@@ -73,6 +73,7 @@ async function main() {
     const empty = await json('/api/state', {}, cookie);
     assert.equal(empty.response.status, 200);
     assert.equal(empty.body.state.habits.length, 0);
+    assert.equal(empty.body.state.startDateChosen, false);
 
     const state = Model.addHabit(empty.body.state, {
       name: 'Тестовая привычка', icon: '🌱', group: 'Дом и развитие', days: [0, 1, 2, 3, 4, 5, 6]

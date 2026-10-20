@@ -11,7 +11,7 @@ function dateKey(date = new Date()) {
 }
 
 function emptyState() {
-  return HabitModel.init([], dateKey());
+  return { ...HabitModel.init([], dateKey()), startDateChosen: false };
 }
 
 function liaState() {

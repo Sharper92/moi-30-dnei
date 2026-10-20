@@ -70,6 +70,7 @@ async function main() {
   const empty = await request('/api/state', {}, cookie);
   assert.equal(empty.response.status, 200);
   assert.deepEqual(empty.body.state.habits, []);
+  assert.equal(empty.body.state.startDateChosen, false);
 
   const state = Model.addHabit(empty.body.state, {
     name: 'Тестовая привычка',
