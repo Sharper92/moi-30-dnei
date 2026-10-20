@@ -445,6 +445,43 @@ function route_request(PDO $pdo, array $config): never
         exit;
     }
 
+    if ($method === 'POST' && preg_match('#^/api/admin/users/([0-9a-f-]{36})/reset-password$#', $path, $match) === 1) {
+        require_admin($user);
+        enforce_rate_limit($pdo, 'admin-reset-password');
+        $temporaryPassword = random_temporary_password();
+        $pdo->beginTransaction();
+        try {
+            $statement = $pdo->prepare(
+                "UPDATE moi30_users
+                 SET password_hash = ?, must_change_password = 1, updated_at = UTC_TIMESTAMP()
+                 WHERE id = ? AND role = 'user'"
+            );
+            $statement->execute([
+                password_hash($temporaryPassword, PASSWORD_BCRYPT, ['cost' => 12]),
+                $match[1],
+            ]);
+            if ($statement->rowCount() === 0) {
+                $pdo->rollBack();
+                respond(404, ['error' => 'USER_NOT_FOUND']);
+            }
+            $sessions = $pdo->prepare('DELETE FROM moi30_sessions WHERE user_id = ?');
+            $sessions->execute([$match[1]]);
+            $lookup = $pdo->prepare('SELECT id, username FROM moi30_users WHERE id = ?');
+            $lookup->execute([$match[1]]);
+            $target = $lookup->fetch();
+            $pdo->commit();
+            respond(200, [
+                'user' => ['id' => $target['id'], 'username' => $target['username']],
+                'temporaryPassword' => $temporaryPassword,
+            ]);
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $error;
+        }
+    }
+
     if ($method === 'PUT' && $path === '/api/admin/push-settings') {
         require_admin($user);
         $settings = sanitize_push_settings(read_json_body());

@@ -1,10 +1,10 @@
 'use strict';
 
-const CACHE = 'my30days-v5-start-date-1';
+const CACHE = 'my30days-v5-password-reset-1';
 const CACHE_PREFIX = 'my30days-';
 const BASE_URL = new URL('./', self.location.href);
 const INDEX_URL = new URL('index.html', BASE_URL).href;
-const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './default-habits.js', './habit-model.js', './habit-stats.js', './habit-picker.js', './api.js', './admin.js?attempt=1'];
+const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './default-habits.js', './habit-model.js', './habit-stats.js', './habit-picker.js', './api.js', './admin.js?attempt=2'];
 const APP_URLS = new Set(FILES.map(path => new URL(path, BASE_URL).href));
 const PAGE_URLS = new Set([BASE_URL.href, INDEX_URL]);
 

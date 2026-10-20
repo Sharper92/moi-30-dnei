@@ -41,7 +41,10 @@
           <small>Последний вход: ${escapeHtml(dateText(user.lastSeenAt))}</small>
           <small>${user.pushDevices ? `Push: ${user.pushDevices} ${user.pushDevices === 1 ? 'устройство' : 'устройства'}` : 'Push не подключён'}${user.mustChangePassword ? ' · ждёт смены пароля' : ''}</small>
         </div>
-        <button class="btn-danger btn-small" type="button" data-admin-delete="${escapeHtml(user.id)}" data-admin-name="${escapeHtml(user.username)}">Удалить</button>
+        <div class="admin-user-actions">
+          <button class="btn-outline btn-small" type="button" data-admin-reset="${escapeHtml(user.id)}" data-admin-name="${escapeHtml(user.username)}">Сбросить пароль</button>
+          <button class="btn-danger btn-small" type="button" data-admin-delete="${escapeHtml(user.id)}" data-admin-name="${escapeHtml(user.username)}">Удалить</button>
+        </div>
       </div>`).join('') : '<div class="empty">Пользователей пока нет.</div>';
 
     const settings = overview.pushSettings;
@@ -115,6 +118,23 @@
     }
   }
 
+  async function resetPassword(button) {
+    const username = button.dataset.adminName;
+    if (!confirm(`Сбросить пароль пользователя «${username}»? На всех его устройствах будет выполнен выход.`)) return;
+    button.disabled = true;
+    try {
+      const result = await api.adminResetPassword(button.dataset.adminReset);
+      $('admin-reset-login').textContent = result.user.username;
+      $('admin-reset-password').textContent = result.temporaryPassword;
+      $('admin-reset-credentials').hidden = false;
+      toast('Временный пароль создан');
+      await load();
+    } catch (error) {
+      toast('Не удалось сбросить пароль');
+      button.disabled = false;
+    }
+  }
+
   async function saveSettings(event) {
     event.preventDefault();
     const button = $('admin-push-settings-submit');
@@ -171,8 +191,10 @@
     $('admin-push-settings-form').addEventListener('submit', saveSettings);
     $('admin-push-form').addEventListener('submit', sendPush);
     $('admin-users').addEventListener('click', event => {
-      const button = event.target.closest('[data-admin-delete]');
-      if (button) deleteUser(button);
+      const resetButton = event.target.closest('[data-admin-reset]');
+      if (resetButton) { resetPassword(resetButton); return; }
+      const deleteButton = event.target.closest('[data-admin-delete]');
+      if (deleteButton) deleteUser(deleteButton);
     });
     $('admin-refresh').addEventListener('click', load);
   }
