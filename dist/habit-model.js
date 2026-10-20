@@ -49,7 +49,7 @@
   }
 
   function init(defs, start) {
-    if (!Array.isArray(defs) || !defs.length || !isDate(start)) {
+    if (!Array.isArray(defs) || !isDate(start)) {
       throw new Error('Не удалось создать трекер: проверьте привычки и дату начала.');
     }
     const habits = defs.map((definition, slot) => {
@@ -67,7 +67,7 @@
         endDate: null
       };
     });
-    return { version: 4, start, habits, entries: {}, reflections: {} };
+    return { version: 5, start, habits, entries: {}, reflections: {} };
   }
 
   function readLegacyHabits(loaded, seeds, groups) {
@@ -164,22 +164,25 @@
   function sanitize(loaded, defs, groups) {
     try {
       if (!isObject(loaded) || !Array.isArray(loaded.habits) || !isDate(loaded.start)) return null;
-      if (loaded.version !== undefined && loaded.version !== 3 && loaded.version !== 4) return null;
+      if (loaded.version !== undefined && loaded.version !== 3 && loaded.version !== 4 && loaded.version !== 5) return null;
       const allowedGroups = groups === undefined ? GROUPS : groups;
       if (!Array.isArray(allowedGroups) || !allowedGroups.length
         || allowedGroups.some(group => typeof group !== 'string' || !group.trim())) return null;
-      const seeds = init(defs, loaded.start);
+      const seeds = init(Array.isArray(defs) ? defs : [], loaded.start);
       if (seeds.habits.some(habit => !allowedGroups.includes(habit.group))) return null;
-      const habits = loaded.version === 4
-        ? readVersionedHabits(loaded, seeds.habits.length, allowedGroups)
-        : readLegacyHabits(loaded, seeds.habits, allowedGroups);
+      const slotCount = loaded.habits.length
+        ? Math.max(...loaded.habits.map(habit => isObject(habit) && isId(habit.slot) ? habit.slot : -1)) + 1
+        : 0;
+      const habits = loaded.version === 3 || loaded.version === undefined
+        ? (seeds.habits.length ? readLegacyHabits(loaded, seeds.habits, allowedGroups) : null)
+        : readVersionedHabits(loaded, slotCount, allowedGroups);
       if (!habits) return null;
       const knownIds = new Set(habits.map(habit => habit.id));
       const reflections = isObject(loaded.reflections) || Array.isArray(loaded.reflections)
         ? Object.fromEntries(Object.entries(loaded.reflections).filter(([, value]) => typeof value === 'string'))
         : {};
       return {
-        version: 4,
+        version: 5,
         start: loaded.start,
         habits,
         entries: readEntries(loaded.entries, knownIds),
@@ -250,7 +253,7 @@
     ]));
     const nextState = {
       ...state,
-      version: 4,
+      version: 5,
       habits,
       entries,
       reflections: { ...state.reflections }
@@ -258,7 +261,37 @@
     return { state: nextState, habit, startDate };
   }
 
-  const api = { init, sanitize, currentHabits, isEffectiveOn, replacementDate, replaceHabit };
+  function addHabit(state, draft, today) {
+    if (!state || !Array.isArray(state.habits) || !isDate(today)) throw new Error('Не удалось добавить привычку.');
+    if (!isObject(draft) || !validName(draft.name)) throw new Error('Введите название привычки длиной от 1 до 130 символов.');
+    if (!GROUPS.includes(draft.group)) throw new Error('Выберите категорию привычки.');
+    if (!validDays(draft.days) || !draft.days.length) throw new Error('Выберите хотя бы один день недели.');
+    const largestId = state.habits.reduce((largest, habit) => Math.max(largest, habit.id), -1);
+    const largestSlot = state.habits.reduce((largest, habit) => Math.max(largest, habit.slot), -1);
+    if (!Number.isSafeInteger(largestId + 1) || !Number.isSafeInteger(largestSlot + 1)) throw new Error('Не удалось создать новую привычку.');
+    const habit = {
+      id: largestId + 1,
+      slot: largestSlot + 1,
+      name: draft.name.trim(),
+      icon: iconText(draft.icon),
+      group: draft.group,
+      days: uniqueDays(draft.days),
+      startDate: today,
+      endDate: null
+    };
+    return {
+      state: {
+        ...state,
+        version: 5,
+        habits: [...state.habits.map(item => ({ ...item, days: [...item.days] })), habit],
+        entries: Object.fromEntries(Object.entries(state.entries || {}).map(([date, entry]) => [date, { ...entry, statuses: { ...entry.statuses } }])),
+        reflections: { ...state.reflections }
+      },
+      habit
+    };
+  }
+
+  const api = { init, sanitize, currentHabits, isEffectiveOn, replacementDate, replaceHabit, addHabit };
   root.HabitModel = api;
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(typeof globalThis === 'object' ? globalThis : this);

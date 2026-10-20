@@ -2,21 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
 const Model = require('../dist/habit-model.js');
-
-// Read only the two configuration declarations, never execute the app or access storage.
-const appSource = fs.readFileSync(path.join(__dirname, '../dist/index.html'), 'utf8');
-const defsDeclaration = appSource.match(/const defs\s*=\s*\[[\s\S]*?\];/);
-const groupsDeclaration = appSource.match(/const groups\s*=\s*\[[^\]]*\];/);
-assert.ok(defsDeclaration && groupsDeclaration, 'Application habit configuration is available');
-const { defs, groups } = JSON.parse(JSON.stringify(vm.runInNewContext(
-  defsDeclaration[0] + '\n' + groupsDeclaration[0] + '\n({defs, groups})',
-  {},
-  { timeout: 1000 }
-)));
+const defs = require('../dist/default-habits.js');
+const groups = ['Забота о себе', 'Уход', 'Духовная практика', 'Дом и развитие'];
 
 const START = '2026-10-01';
 const TODAY = '2026-10-20';
@@ -69,7 +57,7 @@ test('v3 migration preserves existing habits, every entry, mood, notes and refle
   const migrated = Model.sanitize(legacy, defs, groups);
 
   assert.ok(migrated);
-  assert.equal(migrated.version, 4);
+  assert.equal(migrated.version, 5);
   assert.equal(migrated.start, START);
   assert.equal(migrated.habits.length, 19);
   assert.deepEqual(migrated.entries, legacy.entries);
@@ -168,7 +156,7 @@ test('v4 backup roundtrip preserves replacement IDs above 18, intervals and all 
   const restored = Model.sanitize(exported, defs, groups);
 
   assert.ok(restored);
-  assert.equal(restored.version, 4);
+  assert.equal(restored.version, 5);
   assert.deepEqual(restored.habits, second.state.habits);
   assert.deepEqual(restored.entries, second.state.entries);
   assert.deepEqual(restored.reflections, second.state.reflections);
