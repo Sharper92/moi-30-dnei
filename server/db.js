@@ -17,9 +17,9 @@ async function createSeedUser(client, { username, password, role, mustChangePass
   const passwordHash = await bcrypt.hash(password, 12);
   const id = crypto.randomUUID();
   await client.query(
-    `INSERT INTO users (id, username, username_key, password_hash, role, must_change_password)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [id, username.trim(), usernameKey(username), passwordHash, role, mustChangePassword]
+    `INSERT INTO users (id, username, username_key, display_name, password_hash, role, must_change_password)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [id, username.trim(), usernameKey(username), username.trim(), passwordHash, role, mustChangePassword]
   );
   await client.query(
     'INSERT INTO user_states (user_id, state, revision) VALUES ($1, $2::jsonb, 0)',

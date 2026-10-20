@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'my30days-v5-control-panel-1';
+const CACHE = 'my30days-v5-profile-1';
 const CACHE_PREFIX = 'my30days-';
 const BASE_URL = new URL('./', self.location.href);
 const INDEX_URL = new URL('index.html', BASE_URL).href;

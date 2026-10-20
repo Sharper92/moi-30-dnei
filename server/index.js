@@ -48,6 +48,18 @@ function validPassword(value) {
   return typeof value === 'string' && value.length >= 10 && value.length <= 200;
 }
 
+function validDisplayName(value) {
+  return typeof value === 'string' && value.trim().length >= 1 && value.trim().length <= 64 && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validUserPushSettings(value) {
+  return value && /^(?:0[9]|1\d|20):00$/.test(value.time)
+    && Array.isArray(value.days) && value.days.length >= 1 && value.days.length <= 7
+    && value.days.every((day, index) => Number.isInteger(day) && day >= 1 && day <= 7 && value.days.indexOf(day) === index)
+    && typeof value.supportEnabled === 'boolean' && typeof value.inactiveEnabled === 'boolean'
+    && (value.pausedUntil == null || value.pausedUntil === '' || /^\d{4}-\d{2}-\d{2}$/.test(value.pausedUntil));
+}
+
 function sessionHash(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -56,6 +68,7 @@ function publicUser(row) {
   return {
     id: row.id,
     username: row.username,
+    displayName: row.display_name || row.username,
     role: row.role,
     mustChangePassword: row.must_change_password
   };
@@ -113,9 +126,9 @@ app.post('/api/auth/register', authLimiter, async (req, res, next) => {
     const id = crypto.randomUUID();
     const passwordHash = await bcrypt.hash(password, 12);
     const inserted = await client.query(
-      `INSERT INTO users (id, username, username_key, password_hash, role, must_change_password)
-       VALUES ($1, $2, $3, $4, 'user', false) RETURNING *`,
-      [id, username.trim(), usernameKey(username), passwordHash]
+      `INSERT INTO users (id, username, username_key, display_name, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, 'user', false) RETURNING *`,
+      [id, username.trim(), usernameKey(username), username.trim(), passwordHash]
     );
     await client.query('INSERT INTO user_states (user_id, state, revision) VALUES ($1, $2::jsonb, 0)', [id, JSON.stringify(emptyState())]);
     await client.query('COMMIT');
@@ -171,6 +184,67 @@ app.post('/api/auth/change-password', authRequired, authLimiter, async (req, res
     );
     await pool.query('DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2', [req.user.id, req.sessionTokenHash]);
     res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/profile', authRequired, async (req, res, next) => {
+  try {
+    if (req.user.must_change_password) return res.status(403).json({ error: 'PASSWORD_CHANGE_REQUIRED' });
+    const result = await pool.query(
+      `SELECT notification_time::text, notification_days, support_enabled, inactive_enabled, paused_until::text
+       FROM user_preferences WHERE user_id = $1`, [req.user.id]
+    );
+    const preferences = result.rows[0];
+    res.json({
+      user: publicUser(req.user),
+      pushSettings: preferences ? {
+        time: preferences.notification_time.slice(0, 5),
+        days: preferences.notification_days,
+        supportEnabled: preferences.support_enabled,
+        inactiveEnabled: preferences.inactive_enabled,
+        pausedUntil: preferences.paused_until
+      } : { time: '18:00', days: [1, 2, 3, 4, 5, 6, 7], supportEnabled: true, inactiveEnabled: true, pausedUntil: null },
+      pushDevices: 0
+    });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/profile', authRequired, authLimiter, async (req, res, next) => {
+  try {
+    const displayName = req.body?.displayName;
+    const username = req.body?.username;
+    if (!validDisplayName(displayName)) return res.status(400).json({ error: 'INVALID_DISPLAY_NAME' });
+    if (!validUsername(username)) return res.status(400).json({ error: 'INVALID_USERNAME' });
+    const changed = usernameKey(username) !== req.user.username_key;
+    if (changed && !(await bcrypt.compare(String(req.body?.currentPassword || ''), req.user.password_hash))) {
+      return res.status(400).json({ error: 'WRONG_PASSWORD' });
+    }
+    const result = await pool.query(
+      `UPDATE users SET display_name = $1, username = $2, username_key = $3, updated_at = now()
+       WHERE id = $4 RETURNING *`,
+      [displayName.trim(), username.trim(), usernameKey(username), req.user.id]
+    );
+    res.json({ user: publicUser(result.rows[0]) });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'USERNAME_TAKEN' });
+    next(error);
+  }
+});
+
+app.put('/api/profile/push-settings', authRequired, async (req, res, next) => {
+  try {
+    if (!validUserPushSettings(req.body)) return res.status(400).json({ error: 'INVALID_PUSH_SETTINGS' });
+    const settings = { ...req.body, pausedUntil: req.body.pausedUntil || null };
+    await pool.query(
+      `INSERT INTO user_preferences
+        (user_id, notification_time, notification_days, support_enabled, inactive_enabled, paused_until)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id) DO UPDATE SET notification_time = EXCLUDED.notification_time,
+         notification_days = EXCLUDED.notification_days, support_enabled = EXCLUDED.support_enabled,
+         inactive_enabled = EXCLUDED.inactive_enabled, paused_until = EXCLUDED.paused_until, updated_at = now()`,
+      [req.user.id, settings.time, settings.days, settings.supportEnabled, settings.inactiveEnabled, settings.pausedUntil]
+    );
+    res.json({ pushSettings: settings });
   } catch (error) { next(error); }
 });
 

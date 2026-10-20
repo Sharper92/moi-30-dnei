@@ -135,6 +135,16 @@ function migrate_and_seed(PDO $pdo, array $config): void
             setting_value JSON NOT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "CREATE TABLE IF NOT EXISTS moi30_user_preferences (
+            user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+            notification_time CHAR(5) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '18:00',
+            notification_days VARCHAR(13) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '1,2,3,4,5,6,7',
+            support_enabled TINYINT(1) NOT NULL DEFAULT 1,
+            inactive_enabled TINYINT(1) NOT NULL DEFAULT 1,
+            paused_until DATE NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            CONSTRAINT moi30_preferences_user_fk FOREIGN KEY (user_id) REFERENCES moi30_users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ];
 
     foreach ($statements as $statement) {
@@ -144,6 +154,11 @@ function migrate_and_seed(PDO $pdo, array $config): void
     $column = $pdo->query("SHOW COLUMNS FROM moi30_users LIKE 'last_seen_at'")->fetch();
     if (!$column) {
         $pdo->exec('ALTER TABLE moi30_users ADD COLUMN last_seen_at DATETIME NULL AFTER must_change_password');
+    }
+    $displayNameColumn = $pdo->query("SHOW COLUMNS FROM moi30_users LIKE 'display_name'")->fetch();
+    if (!$displayNameColumn) {
+        $pdo->exec('ALTER TABLE moi30_users ADD COLUMN display_name VARCHAR(64) NULL AFTER username_key');
+        $pdo->exec('UPDATE moi30_users SET display_name = username WHERE display_name IS NULL');
     }
     $pushKind = $pdo->query("SHOW COLUMNS FROM moi30_push_log LIKE 'kind'")->fetch();
     if ($pushKind && !str_contains((string)$pushKind['Type'], "'manual'")) {
@@ -190,10 +205,10 @@ function create_seed_user(PDO $pdo, string $username, string $password, string $
 {
     $id = uuid_v4();
     $statement = $pdo->prepare(
-        'INSERT INTO moi30_users (id, username, username_key, password_hash, role, must_change_password)
-         VALUES (?, ?, ?, ?, ?, 1)'
+        'INSERT INTO moi30_users (id, username, username_key, display_name, password_hash, role, must_change_password)
+         VALUES (?, ?, ?, ?, ?, ?, 1)'
     );
-    $statement->execute([$id, trim($username), username_key($username), password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]), $role]);
+    $statement->execute([$id, trim($username), username_key($username), trim($username), password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]), $role]);
     insert_state($pdo, $id, $state);
 }
 
@@ -225,13 +240,14 @@ function route_request(PDO $pdo, array $config): never
         try {
             $id = uuid_v4();
             $statement = $pdo->prepare(
-                "INSERT INTO moi30_users (id, username, username_key, password_hash, role, must_change_password)
-                 VALUES (?, ?, ?, ?, 'user', 0)"
+                "INSERT INTO moi30_users (id, username, username_key, display_name, password_hash, role, must_change_password)
+                 VALUES (?, ?, ?, ?, ?, 'user', 0)"
             );
             $statement->execute([
                 $id,
                 trim((string)$username),
                 username_key((string)$username),
+                trim((string)$username),
                 password_hash((string)$password, PASSWORD_BCRYPT, ['cost' => 12]),
             ]);
             insert_state($pdo, $id, empty_state());
@@ -308,6 +324,79 @@ function route_request(PDO $pdo, array $config): never
         respond(200, ['ok' => true]);
     }
 
+    if ($method === 'GET' && $path === '/api/profile') {
+        if ((bool)$user['must_change_password']) {
+            respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+        }
+        $devices = $pdo->prepare(
+            'SELECT COUNT(*) FROM moi30_push_subscriptions WHERE user_id = ? AND enabled = 1'
+        );
+        $devices->execute([$user['id']]);
+        respond(200, [
+            'user' => public_user($user),
+            'pushSettings' => load_user_push_settings($pdo, $user['id']),
+            'pushDevices' => (int)$devices->fetchColumn(),
+        ]);
+    }
+
+    if ($method === 'PUT' && $path === '/api/profile') {
+        if ((bool)$user['must_change_password']) {
+            respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+        }
+        enforce_rate_limit($pdo, 'profile');
+        $body = read_json_body();
+        $displayName = $body['displayName'] ?? null;
+        $username = $body['username'] ?? null;
+        if (!valid_display_name($displayName)) {
+            respond(400, ['error' => 'INVALID_DISPLAY_NAME']);
+        }
+        if (!valid_username($username)) {
+            respond(400, ['error' => 'INVALID_USERNAME']);
+        }
+        $usernameChanged = username_key((string)$username) !== (string)$user['username_key'];
+        if ($usernameChanged && !password_verify((string)($body['currentPassword'] ?? ''), $user['password_hash'])) {
+            respond(400, ['error' => 'WRONG_PASSWORD']);
+        }
+        try {
+            $statement = $pdo->prepare(
+                'UPDATE moi30_users SET display_name = ?, username = ?, username_key = ?, updated_at = UTC_TIMESTAMP() WHERE id = ?'
+            );
+            $statement->execute([
+                trim((string)$displayName), trim((string)$username), username_key((string)$username), $user['id'],
+            ]);
+        } catch (PDOException $error) {
+            if ((string)$error->getCode() === '23000') {
+                respond(409, ['error' => 'USERNAME_TAKEN']);
+            }
+            throw $error;
+        }
+        respond(200, ['user' => public_user(find_user_by_id($pdo, $user['id']))]);
+    }
+
+    if ($method === 'PUT' && $path === '/api/profile/push-settings') {
+        if ((bool)$user['must_change_password']) {
+            respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+        }
+        $settings = sanitize_user_push_settings(read_json_body());
+        if ($settings === null) {
+            respond(400, ['error' => 'INVALID_PUSH_SETTINGS']);
+        }
+        $statement = $pdo->prepare(
+            'INSERT INTO moi30_user_preferences
+                (user_id, notification_time, notification_days, support_enabled, inactive_enabled, paused_until)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE notification_time = VALUES(notification_time),
+                notification_days = VALUES(notification_days), support_enabled = VALUES(support_enabled),
+                inactive_enabled = VALUES(inactive_enabled), paused_until = VALUES(paused_until),
+                updated_at = UTC_TIMESTAMP()'
+        );
+        $statement->execute([
+            $user['id'], $settings['time'], implode(',', $settings['days']),
+            (int)$settings['supportEnabled'], (int)$settings['inactiveEnabled'], $settings['pausedUntil'],
+        ]);
+        respond(200, ['pushSettings' => $settings]);
+    }
+
     if ($method === 'GET' && $path === '/api/push/config') {
         if ((bool)$user['must_change_password']) {
             respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
@@ -372,7 +461,7 @@ function route_request(PDO $pdo, array $config): never
              FROM moi30_users WHERE role = 'user'"
         )->fetch();
         $users = $pdo->query(
-            "SELECT u.id, u.username, u.must_change_password, u.last_seen_at, u.created_at,
+            "SELECT u.id, u.username, u.display_name, u.must_change_password, u.last_seen_at, u.created_at,
                     (SELECT COUNT(*) FROM moi30_push_subscriptions ps
                      WHERE ps.user_id = u.id AND ps.enabled = 1) AS push_devices
              FROM moi30_users u WHERE u.role = 'user'
@@ -388,6 +477,7 @@ function route_request(PDO $pdo, array $config): never
             'users' => array_map(static fn(array $row): array => [
                 'id' => $row['id'],
                 'username' => $row['username'],
+                'displayName' => $row['display_name'] ?: $row['username'],
                 'mustChangePassword' => (bool)$row['must_change_password'],
                 'lastSeenAt' => $row['last_seen_at'],
                 'createdAt' => $row['created_at'],
@@ -410,17 +500,17 @@ function route_request(PDO $pdo, array $config): never
         try {
             $id = uuid_v4();
             $statement = $pdo->prepare(
-                "INSERT INTO moi30_users (id, username, username_key, password_hash, role, must_change_password)
-                 VALUES (?, ?, ?, ?, 'user', 1)"
+                "INSERT INTO moi30_users (id, username, username_key, display_name, password_hash, role, must_change_password)
+                 VALUES (?, ?, ?, ?, ?, 'user', 1)"
             );
             $statement->execute([
-                $id, trim((string)$username), username_key((string)$username),
+                $id, trim((string)$username), username_key((string)$username), trim((string)$username),
                 password_hash($temporaryPassword, PASSWORD_BCRYPT, ['cost' => 12]),
             ]);
             insert_state($pdo, $id, empty_state());
             $pdo->commit();
             respond(201, [
-                'user' => ['id' => $id, 'username' => trim((string)$username)],
+                'user' => ['id' => $id, 'username' => trim((string)$username), 'displayName' => trim((string)$username)],
                 'temporaryPassword' => $temporaryPassword,
             ]);
         } catch (PDOException $error) {
@@ -721,6 +811,76 @@ function load_push_settings(PDO $pdo): array
     }
 }
 
+function default_user_push_settings(): array
+{
+    return [
+        'time' => '18:00',
+        'days' => [1, 2, 3, 4, 5, 6, 7],
+        'supportEnabled' => true,
+        'inactiveEnabled' => true,
+        'pausedUntil' => null,
+    ];
+}
+
+function sanitize_user_push_settings(mixed $value): ?array
+{
+    if (!is_array($value)
+        || !is_string($value['time'] ?? null)
+        || preg_match('/^(?:0[9]|1[0-9]|20):00$/', $value['time']) !== 1
+        || !is_array($value['days'] ?? null)
+        || !is_bool($value['supportEnabled'] ?? null)
+        || !is_bool($value['inactiveEnabled'] ?? null)) {
+        return null;
+    }
+    $days = array_values(array_unique($value['days']));
+    sort($days);
+    if ($days === [] || count($days) > 7) {
+        return null;
+    }
+    foreach ($days as $day) {
+        if (!is_int($day) || $day < 1 || $day > 7) {
+            return null;
+        }
+    }
+    $pausedUntil = $value['pausedUntil'] ?? null;
+    if ($pausedUntil === '') {
+        $pausedUntil = null;
+    }
+    if ($pausedUntil !== null && !valid_date_key($pausedUntil)) {
+        return null;
+    }
+    return [
+        'time' => $value['time'],
+        'days' => $days,
+        'supportEnabled' => $value['supportEnabled'],
+        'inactiveEnabled' => $value['inactiveEnabled'],
+        'pausedUntil' => $pausedUntil,
+    ];
+}
+
+function load_user_push_settings(PDO $pdo, string $userId): array
+{
+    $statement = $pdo->prepare(
+        'SELECT notification_time, notification_days, support_enabled, inactive_enabled, paused_until
+         FROM moi30_user_preferences WHERE user_id = ?'
+    );
+    $statement->execute([$userId]);
+    $row = $statement->fetch();
+    if (!$row) {
+        return default_user_push_settings();
+    }
+    $days = array_values(array_filter(array_map('intval', explode(',', (string)$row['notification_days'])),
+        static fn(int $day): bool => $day >= 1 && $day <= 7));
+    $settings = sanitize_user_push_settings([
+        'time' => substr((string)$row['notification_time'], 0, 5),
+        'days' => $days,
+        'supportEnabled' => (bool)$row['support_enabled'],
+        'inactiveEnabled' => (bool)$row['inactive_enabled'],
+        'pausedUntil' => $row['paused_until'],
+    ]);
+    return $settings ?? default_user_push_settings();
+}
+
 function issue_session(PDO $pdo, array $config, string $userId): void
 {
     $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
@@ -760,6 +920,7 @@ function public_user(array $row): array
     return [
         'id' => $row['id'],
         'username' => $row['username'],
+        'displayName' => ($row['display_name'] ?? null) ?: $row['username'],
         'role' => $row['role'],
         'mustChangePassword' => (bool)$row['must_change_password'],
     ];
@@ -809,6 +970,16 @@ function valid_username(mixed $value): bool
     }
     $value = trim($value);
     return preg_match('/^[\p{L}\p{N}_.-]{3,32}$/u', $value) === 1;
+}
+
+function valid_display_name(mixed $value): bool
+{
+    if (!is_string($value)) {
+        return false;
+    }
+    $value = trim($value);
+    return unicode_length($value) >= 1 && unicode_length($value) <= 64
+        && preg_match('/[\x{0000}-\x{001F}\x{007F}]/u', $value) !== 1;
 }
 
 function valid_password(mixed $value): bool

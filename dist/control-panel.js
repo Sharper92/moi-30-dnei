@@ -37,7 +37,8 @@
 
     $('admin-users').innerHTML = overview.users.length ? overview.users.map(user => `
       <div class="admin-user">
-        <div class="admin-user-main"><strong>${escapeHtml(user.username)}</strong>
+        <div class="admin-user-main"><strong>${escapeHtml(user.displayName || user.username)}</strong>
+          <small>Логин: ${escapeHtml(user.username)}</small>
           <small>Последний вход: ${escapeHtml(dateText(user.lastSeenAt))}</small>
           <small>${user.pushDevices ? `Push: ${user.pushDevices} ${user.pushDevices === 1 ? 'устройство' : 'устройства'}` : 'Push не подключён'}${user.mustChangePassword ? ' · ждёт смены пароля' : ''}</small>
         </div>
@@ -56,7 +57,7 @@
 
     const pushUsers = overview.users.filter(user => user.pushDevices > 0);
     $('admin-push-recipient').innerHTML = '<option value="all">Все пользователи с Push</option>' + pushUsers.map(user =>
-      `<option value="${escapeHtml(user.id)}">${escapeHtml(user.username)} · ${user.pushDevices} устр.</option>`
+      `<option value="${escapeHtml(user.id)}">${escapeHtml(user.displayName || user.username)} · ${user.pushDevices} устр.</option>`
     ).join('');
     $('admin-push-audience').textContent = pushUsers.length
       ? `Push подключён у ${pushUsers.length} из ${overview.users.length} пользователей.`

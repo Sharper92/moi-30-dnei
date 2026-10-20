@@ -46,10 +46,16 @@ function run_worker(PDO $pdo, array $pushConfig): void
 
     $settings = worker_push_settings($pdo);
     $users = $pdo->query(
-        "SELECT DISTINCT u.id, u.last_seen_at, st.state
+        "SELECT DISTINCT u.id, u.last_seen_at, st.state,
+                COALESCE(pref.notification_time, '18:00') AS notification_time,
+                COALESCE(pref.notification_days, '1,2,3,4,5,6,7') AS notification_days,
+                COALESCE(pref.support_enabled, 1) AS user_support_enabled,
+                COALESCE(pref.inactive_enabled, 1) AS user_inactive_enabled,
+                pref.paused_until
          FROM moi30_users u
          INNER JOIN moi30_push_subscriptions ps ON ps.user_id = u.id AND ps.enabled = 1
          INNER JOIN moi30_user_states st ON st.user_id = u.id
+         LEFT JOIN moi30_user_preferences pref ON pref.user_id = u.id
          WHERE u.must_change_password = 0"
     )->fetchAll();
 
@@ -86,7 +92,11 @@ function process_user(PDO $pdo, array $pushConfig, array $settings, array $user)
     $nowUtc = new DateTimeImmutable('now', new DateTimeZone('UTC'));
     $nowLocal = $nowUtc->setTimezone($timezone);
     $hour = (int)$nowLocal->format('G');
-    if ($hour < 9 || $hour >= 21) {
+    $notificationHour = (int)substr((string)($user['notification_time'] ?? '18:00'), 0, 2);
+    $days = array_map('intval', explode(',', (string)($user['notification_days'] ?? '1,2,3,4,5,6,7')));
+    if ($hour !== $notificationHour || !in_array((int)$nowLocal->format('N'), $days, true)
+        || (is_string($user['paused_until'] ?? null)
+            && $user['paused_until'] !== '' && $user['paused_until'] >= $nowLocal->format('Y-m-d'))) {
         return;
     }
 
@@ -108,13 +118,13 @@ function process_user(PDO $pdo, array $pushConfig, array $settings, array $user)
     }
 
     $kind = null;
-    if ($settings['supportEnabled'] && $hour >= 18 && $hour < 20
+    if ($settings['supportEnabled'] && (bool)$user['user_support_enabled']
         && $lastSeen <= $nowUtc->modify('-' . $settings['supportDelayHours'] . ' hours')
         && $lastSeen >= $nowUtc->modify('-24 hours')
         && has_marks_for_date($state, $nowLocal->format('Y-m-d'))
         && !was_sent_on_local_date($delivery['last_support'] ?? null, $nowLocal, $timezone)) {
         $kind = 'support';
-    } elseif ($settings['inactiveEnabled'] && $hour >= 11 && $hour < 19
+    } elseif ($settings['inactiveEnabled'] && (bool)$user['user_inactive_enabled']
         && $lastSeen <= $nowUtc->modify('-' . $settings['inactivityDays'] . ' days')
         && oldest_subscription_is_ready($subscriptions, $nowUtc)
         && timestamp_is_older_than(
