@@ -44,6 +44,7 @@ function run_worker(PDO $pdo, array $pushConfig): void
         }
     }
 
+    $settings = worker_push_settings($pdo);
     $users = $pdo->query(
         "SELECT DISTINCT u.id, u.last_seen_at, st.state
          FROM moi30_users u
@@ -54,14 +55,14 @@ function run_worker(PDO $pdo, array $pushConfig): void
 
     foreach ($users as $user) {
         try {
-            process_user($pdo, $pushConfig, $user);
+            process_user($pdo, $pushConfig, $settings, $user);
         } catch (Throwable $error) {
             error_log('Moi30 push failed for user ' . $user['id'] . ': ' . $error->getMessage());
         }
     }
 }
 
-function process_user(PDO $pdo, array $pushConfig, array $user): void
+function process_user(PDO $pdo, array $pushConfig, array $settings, array $user): void
 {
     if (!is_string($user['last_seen_at'] ?? null) || $user['last_seen_at'] === '') {
         return;
@@ -96,7 +97,7 @@ function process_user(PDO $pdo, array $pushConfig, array $user): void
     );
     $recent->execute([$user['id']]);
     $delivery = $recent->fetch();
-    if ((int)$delivery['week_count'] >= 3) {
+    if ((int)$delivery['week_count'] >= $settings['maxWeekly']) {
         return;
     }
 
@@ -107,16 +108,19 @@ function process_user(PDO $pdo, array $pushConfig, array $user): void
     }
 
     $kind = null;
-    if ($hour >= 18 && $hour < 20
-        && $lastSeen <= $nowUtc->modify('-2 hours')
+    if ($settings['supportEnabled'] && $hour >= 18 && $hour < 20
+        && $lastSeen <= $nowUtc->modify('-' . $settings['supportDelayHours'] . ' hours')
         && $lastSeen >= $nowUtc->modify('-24 hours')
         && has_marks_for_date($state, $nowLocal->format('Y-m-d'))
         && !was_sent_on_local_date($delivery['last_support'] ?? null, $nowLocal, $timezone)) {
         $kind = 'support';
-    } elseif ($hour >= 11 && $hour < 19
-        && $lastSeen <= $nowUtc->modify('-72 hours')
+    } elseif ($settings['inactiveEnabled'] && $hour >= 11 && $hour < 19
+        && $lastSeen <= $nowUtc->modify('-' . $settings['inactivityDays'] . ' days')
         && oldest_subscription_is_ready($subscriptions, $nowUtc)
-        && timestamp_is_older_than($delivery['last_sent'] ?? null, $nowUtc->modify('-72 hours'))) {
+        && timestamp_is_older_than(
+            $delivery['last_sent'] ?? null,
+            $nowUtc->modify('-' . $settings['inactivityDays'] . ' days')
+        )) {
         $kind = 'inactive';
     }
     if ($kind === null) {
@@ -163,6 +167,35 @@ function process_user(PDO $pdo, array $pushConfig, array $user): void
             'INSERT INTO moi30_push_log (user_id, kind, successful_devices) VALUES (?, ?, ?)'
         );
         $log->execute([$user['id'], $kind, $successful]);
+    }
+}
+
+function worker_push_settings(PDO $pdo): array
+{
+    $defaults = [
+        'maxWeekly' => 3,
+        'inactivityDays' => 3,
+        'supportDelayHours' => 2,
+        'supportEnabled' => true,
+        'inactiveEnabled' => true,
+    ];
+    try {
+        $value = $pdo->query(
+            "SELECT setting_value FROM moi30_settings WHERE setting_key = 'push' LIMIT 1"
+        )->fetchColumn();
+        $settings = is_string($value) ? json_decode($value, true, 32, JSON_THROW_ON_ERROR) : null;
+        if (!is_array($settings)) {
+            return $defaults;
+        }
+        return [
+            'maxWeekly' => max(1, min(7, (int)($settings['maxWeekly'] ?? 3))),
+            'inactivityDays' => max(1, min(14, (int)($settings['inactivityDays'] ?? 3))),
+            'supportDelayHours' => max(1, min(8, (int)($settings['supportDelayHours'] ?? 2))),
+            'supportEnabled' => (bool)($settings['supportEnabled'] ?? true),
+            'inactiveEnabled' => (bool)($settings['inactiveEnabled'] ?? true),
+        ];
+    } catch (Throwable) {
+        return $defaults;
     }
 }
 

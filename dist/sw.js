@@ -1,10 +1,10 @@
 'use strict';
 
-const CACHE = 'my30days-v5-push-1';
+const CACHE = 'my30days-v5-admin-2';
 const CACHE_PREFIX = 'my30days-';
 const BASE_URL = new URL('./', self.location.href);
 const INDEX_URL = new URL('index.html', BASE_URL).href;
-const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './default-habits.js', './habit-model.js', './habit-stats.js', './habit-picker.js', './api.js'];
+const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './default-habits.js', './habit-model.js', './habit-stats.js', './habit-picker.js', './api.js', './admin.js?attempt=1'];
 const APP_URLS = new Set(FILES.map(path => new URL(path, BASE_URL).href));
 const PAGE_URLS = new Set([BASE_URL.href, INDEX_URL]);
 
@@ -62,7 +62,7 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
   if (url.origin !== BASE_URL.origin) return;
-  const key = url.origin + url.pathname;
+  const key = url.href;
   // Only the application files belong in this cache; leave authentication and other routes alone.
   if (!APP_URLS.has(key)) return;
   event.respondWith(PAGE_URLS.has(key) ? pageResponse(event.request, key) : assetResponse(event.request, key));

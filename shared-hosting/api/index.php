@@ -124,11 +124,16 @@ function migrate_and_seed(PDO $pdo, array $config): void
         "CREATE TABLE IF NOT EXISTS moi30_push_log (
             id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-            kind ENUM('support', 'inactive') NOT NULL,
+            kind ENUM('support', 'inactive', 'manual') NOT NULL,
             successful_devices SMALLINT UNSIGNED NOT NULL DEFAULT 0,
             sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX moi30_push_log_user_time_idx (user_id, sent_at),
             CONSTRAINT moi30_push_log_user_fk FOREIGN KEY (user_id) REFERENCES moi30_users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "CREATE TABLE IF NOT EXISTS moi30_settings (
+            setting_key VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+            setting_value JSON NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ];
 
@@ -140,6 +145,15 @@ function migrate_and_seed(PDO $pdo, array $config): void
     if (!$column) {
         $pdo->exec('ALTER TABLE moi30_users ADD COLUMN last_seen_at DATETIME NULL AFTER must_change_password');
     }
+    $pushKind = $pdo->query("SHOW COLUMNS FROM moi30_push_log LIKE 'kind'")->fetch();
+    if ($pushKind && !str_contains((string)$pushKind['Type'], "'manual'")) {
+        $pdo->exec("ALTER TABLE moi30_push_log MODIFY kind ENUM('support', 'inactive', 'manual') NOT NULL");
+    }
+    $defaultPushSettings = encode_json(default_push_settings());
+    $setting = $pdo->prepare(
+        "INSERT IGNORE INTO moi30_settings (setting_key, setting_value) VALUES ('push', ?)"
+    );
+    $setting->execute([$defaultPushSettings]);
 
     $lock = $pdo->query("SELECT GET_LOCK('moi30_seed_lock', 10)")->fetchColumn();
     if ((string)$lock !== '1') {
@@ -348,6 +362,140 @@ function route_request(PDO $pdo, array $config): never
         exit;
     }
 
+    if ($method === 'GET' && $path === '/api/admin/overview') {
+        require_admin($user);
+        $stats = $pdo->query(
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(last_seen_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)), 0) AS active24,
+                    COALESCE(SUM(last_seen_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)), 0) AS active7,
+                    COALESCE(SUM(last_seen_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)), 0) AS active30
+             FROM moi30_users WHERE role = 'user'"
+        )->fetch();
+        $users = $pdo->query(
+            "SELECT u.id, u.username, u.must_change_password, u.last_seen_at, u.created_at,
+                    (SELECT COUNT(*) FROM moi30_push_subscriptions ps
+                     WHERE ps.user_id = u.id AND ps.enabled = 1) AS push_devices
+             FROM moi30_users u WHERE u.role = 'user'
+             ORDER BY COALESCE(u.last_seen_at, u.created_at) DESC, u.username ASC"
+        )->fetchAll();
+        respond(200, [
+            'stats' => [
+                'total' => (int)$stats['total'],
+                'active24' => (int)$stats['active24'],
+                'active7' => (int)$stats['active7'],
+                'active30' => (int)$stats['active30'],
+            ],
+            'users' => array_map(static fn(array $row): array => [
+                'id' => $row['id'],
+                'username' => $row['username'],
+                'mustChangePassword' => (bool)$row['must_change_password'],
+                'lastSeenAt' => $row['last_seen_at'],
+                'createdAt' => $row['created_at'],
+                'pushDevices' => (int)$row['push_devices'],
+            ], $users),
+            'pushSettings' => load_push_settings($pdo),
+        ]);
+    }
+
+    if ($method === 'POST' && $path === '/api/admin/users') {
+        require_admin($user);
+        enforce_rate_limit($pdo, 'admin-create-user');
+        $body = read_json_body();
+        $username = $body['username'] ?? null;
+        if (!valid_username($username)) {
+            respond(400, ['error' => 'INVALID_USERNAME']);
+        }
+        $temporaryPassword = random_temporary_password();
+        $pdo->beginTransaction();
+        try {
+            $id = uuid_v4();
+            $statement = $pdo->prepare(
+                "INSERT INTO moi30_users (id, username, username_key, password_hash, role, must_change_password)
+                 VALUES (?, ?, ?, ?, 'user', 1)"
+            );
+            $statement->execute([
+                $id, trim((string)$username), username_key((string)$username),
+                password_hash($temporaryPassword, PASSWORD_BCRYPT, ['cost' => 12]),
+            ]);
+            insert_state($pdo, $id, empty_state());
+            $pdo->commit();
+            respond(201, [
+                'user' => ['id' => $id, 'username' => trim((string)$username)],
+                'temporaryPassword' => $temporaryPassword,
+            ]);
+        } catch (PDOException $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            if ((string)$error->getCode() === '23000') {
+                respond(409, ['error' => 'USERNAME_TAKEN']);
+            }
+            throw $error;
+        }
+    }
+
+    if ($method === 'DELETE' && preg_match('#^/api/admin/users/([0-9a-f-]{36})$#', $path, $match) === 1) {
+        require_admin($user);
+        $statement = $pdo->prepare("DELETE FROM moi30_users WHERE id = ? AND role = 'user'");
+        $statement->execute([$match[1]]);
+        if ($statement->rowCount() === 0) {
+            respond(404, ['error' => 'USER_NOT_FOUND']);
+        }
+        http_response_code(204);
+        exit;
+    }
+
+    if ($method === 'PUT' && $path === '/api/admin/push-settings') {
+        require_admin($user);
+        $settings = sanitize_push_settings(read_json_body());
+        if ($settings === null) {
+            respond(400, ['error' => 'INVALID_PUSH_SETTINGS']);
+        }
+        $statement = $pdo->prepare(
+            "INSERT INTO moi30_settings (setting_key, setting_value) VALUES ('push', ?)
+             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = UTC_TIMESTAMP()"
+        );
+        $statement->execute([encode_json($settings)]);
+        respond(200, ['pushSettings' => $settings]);
+    }
+
+    if ($method === 'POST' && $path === '/api/admin/push-message') {
+        require_admin($user);
+        enforce_rate_limit($pdo, 'admin-push-message');
+        if (!push_is_configured($config)) {
+            respond(503, ['error' => 'PUSH_UNAVAILABLE']);
+        }
+        $body = read_json_body();
+        $title = trim((string)($body['title'] ?? ''));
+        $message = trim((string)($body['message'] ?? ''));
+        $recipient = $body['recipient'] ?? null;
+        if (unicode_length($title) < 3 || unicode_length($title) > 60
+            || unicode_length($message) < 3 || unicode_length($message) > 220
+            || (!is_string($recipient) || ($recipient !== 'all'
+                && preg_match('/^[0-9a-f-]{36}$/', $recipient) !== 1))) {
+            respond(400, ['error' => 'INVALID_PUSH_MESSAGE']);
+        }
+        if ($recipient === 'all') {
+            $targets = $pdo->query("SELECT id FROM moi30_users WHERE role = 'user'")->fetchAll(PDO::FETCH_COLUMN);
+        } else {
+            $target = $pdo->prepare("SELECT id FROM moi30_users WHERE id = ? AND role = 'user'");
+            $target->execute([$recipient]);
+            $targets = $target->fetchAll(PDO::FETCH_COLUMN);
+            if ($targets === []) {
+                respond(404, ['error' => 'USER_NOT_FOUND']);
+            }
+        }
+        $senderPath = dirname(__DIR__, 3) . '/moi30-push/send.php';
+        $autoloadPath = dirname(__DIR__, 3) . '/moi30-push/vendor/autoload.php';
+        if (!is_file($senderPath) || !is_file($autoloadPath)) {
+            respond(503, ['error' => 'PUSH_UNAVAILABLE']);
+        }
+        require_once $autoloadPath;
+        require_once $senderPath;
+        $result = moi30_send_manual_push($pdo, $config['push'], $targets, $title, $message);
+        respond(200, $result);
+    }
+
     if ($method === 'GET' && $path === '/api/state') {
         if ((bool)$user['must_change_password']) {
             respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
@@ -474,6 +622,66 @@ function valid_timezone(mixed $value): string
     static $known = null;
     $known ??= array_fill_keys(timezone_identifiers_list(), true);
     return isset($known[$value]) ? $value : 'UTC';
+}
+
+function require_admin(array $user): void
+{
+    if ((bool)($user['must_change_password'] ?? false)) {
+        respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+    }
+    if (($user['role'] ?? null) !== 'admin') {
+        respond(403, ['error' => 'ADMIN_REQUIRED']);
+    }
+}
+
+function random_temporary_password(): string
+{
+    return rtrim(strtr(base64_encode(random_bytes(18)), '+/', '-_'), '=');
+}
+
+function default_push_settings(): array
+{
+    return [
+        'maxWeekly' => 3,
+        'inactivityDays' => 3,
+        'supportDelayHours' => 2,
+        'supportEnabled' => true,
+        'inactiveEnabled' => true,
+    ];
+}
+
+function sanitize_push_settings(mixed $value): ?array
+{
+    if (!is_array($value)
+        || !is_int($value['maxWeekly'] ?? null) || $value['maxWeekly'] < 1 || $value['maxWeekly'] > 7
+        || !is_int($value['inactivityDays'] ?? null) || $value['inactivityDays'] < 1 || $value['inactivityDays'] > 14
+        || !is_int($value['supportDelayHours'] ?? null) || $value['supportDelayHours'] < 1 || $value['supportDelayHours'] > 8
+        || !is_bool($value['supportEnabled'] ?? null) || !is_bool($value['inactiveEnabled'] ?? null)) {
+        return null;
+    }
+    return [
+        'maxWeekly' => $value['maxWeekly'],
+        'inactivityDays' => $value['inactivityDays'],
+        'supportDelayHours' => $value['supportDelayHours'],
+        'supportEnabled' => $value['supportEnabled'],
+        'inactiveEnabled' => $value['inactiveEnabled'],
+    ];
+}
+
+function load_push_settings(PDO $pdo): array
+{
+    $statement = $pdo->prepare("SELECT setting_value FROM moi30_settings WHERE setting_key = 'push'");
+    $statement->execute();
+    $value = $statement->fetchColumn();
+    if (!is_string($value)) {
+        return default_push_settings();
+    }
+    try {
+        return sanitize_push_settings(json_decode($value, true, 32, JSON_THROW_ON_ERROR))
+            ?? default_push_settings();
+    } catch (JsonException) {
+        return default_push_settings();
+    }
 }
 
 function issue_session(PDO $pdo, array $config, string $userId): void
