@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'my30days-v5-accounts-2';
+const CACHE = 'my30days-v5-push-1';
 const CACHE_PREFIX = 'my30days-';
 const BASE_URL = new URL('./', self.location.href);
 const INDEX_URL = new URL('index.html', BASE_URL).href;
@@ -66,4 +66,38 @@ self.addEventListener('fetch', event => {
   // Only the application files belong in this cache; leave authentication and other routes alone.
   if (!APP_URLS.has(key)) return;
   event.respondWith(PAGE_URLS.has(key) ? pageResponse(event.request, key) : assetResponse(event.request, key));
+});
+
+self.addEventListener('push', event => {
+  let message = {};
+  try {
+    message = event.data ? event.data.json() : {};
+  } catch (error) {
+    message = {};
+  }
+  const title = message.title || 'Мои 30 дней 🌿';
+  event.waitUntil(self.registration.showNotification(title, {
+    body: message.body || 'Один маленький шаг тоже считается.',
+    icon: './icon-192.png',
+    badge: './icon-192.png',
+    tag: message.tag || 'moi30-gentle-reminder',
+    renotify: false,
+    data: { url: message.url || './index.html' }
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || './index.html', self.location.origin).href;
+  event.waitUntil((async () => {
+    const windows = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const windowClient of windows) {
+      if (new URL(windowClient.url).origin === self.location.origin) {
+        await windowClient.focus();
+        if ('navigate' in windowClient) await windowClient.navigate(target);
+        return;
+      }
+    }
+    await clients.openWindow(target);
+  })());
 });

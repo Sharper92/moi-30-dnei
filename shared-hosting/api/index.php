@@ -24,6 +24,12 @@ if (!is_array($config)) {
     respond(500, ['error' => 'SERVER_ERROR']);
 }
 
+$pushConfigPath = dirname(__DIR__, 3) . '/moi30-push-config.php';
+$config['push'] = is_file($pushConfigPath) ? require $pushConfigPath : [];
+if (!is_array($config['push'])) {
+    $config['push'] = [];
+}
+
 date_default_timezone_set((string)($config['timezone'] ?? 'UTC'));
 
 if (PHP_SAPI !== 'cli' && !request_is_https()) {
@@ -101,10 +107,38 @@ function migrate_and_seed(PDO $pdo, array $config): void
             window_started DATETIME NOT NULL,
             hits INT UNSIGNED NOT NULL DEFAULT 1
         ) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin",
+        "CREATE TABLE IF NOT EXISTS moi30_push_subscriptions (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            endpoint_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+            endpoint TEXT CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            p256dh VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            auth_token VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            timezone VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'UTC',
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX moi30_push_user_idx (user_id),
+            CONSTRAINT moi30_push_user_fk FOREIGN KEY (user_id) REFERENCES moi30_users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "CREATE TABLE IF NOT EXISTS moi30_push_log (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            kind ENUM('support', 'inactive') NOT NULL,
+            successful_devices SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+            sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX moi30_push_log_user_time_idx (user_id, sent_at),
+            CONSTRAINT moi30_push_log_user_fk FOREIGN KEY (user_id) REFERENCES moi30_users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ];
 
     foreach ($statements as $statement) {
         $pdo->exec($statement);
+    }
+
+    $column = $pdo->query("SHOW COLUMNS FROM moi30_users LIKE 'last_seen_at'")->fetch();
+    if (!$column) {
+        $pdo->exec('ALTER TABLE moi30_users ADD COLUMN last_seen_at DATETIME NULL AFTER must_change_password');
     }
 
     $lock = $pdo->query("SELECT GET_LOCK('moi30_seed_lock', 10)")->fetchColumn();
@@ -260,6 +294,60 @@ function route_request(PDO $pdo, array $config): never
         respond(200, ['ok' => true]);
     }
 
+    if ($method === 'GET' && $path === '/api/push/config') {
+        if ((bool)$user['must_change_password']) {
+            respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+        }
+        $publicKey = $config['push']['publicKey'] ?? null;
+        respond(200, [
+            'available' => is_string($publicKey) && $publicKey !== '',
+            'publicKey' => is_string($publicKey) ? $publicKey : '',
+        ]);
+    }
+
+    if ($method === 'POST' && $path === '/api/push/subscribe') {
+        if ((bool)$user['must_change_password']) {
+            respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
+        }
+        if (!push_is_configured($config)) {
+            respond(503, ['error' => 'PUSH_UNAVAILABLE']);
+        }
+        $body = read_json_body();
+        $subscription = valid_push_subscription($body['subscription'] ?? null);
+        if ($subscription === null) {
+            respond(400, ['error' => 'INVALID_PUSH_SUBSCRIPTION']);
+        }
+        $timezone = valid_timezone($body['timezone'] ?? null);
+        $statement = $pdo->prepare(
+            'INSERT INTO moi30_push_subscriptions
+                (user_id, endpoint_hash, endpoint, p256dh, auth_token, timezone, enabled)
+             VALUES (?, ?, ?, ?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE
+                user_id = VALUES(user_id), endpoint = VALUES(endpoint), p256dh = VALUES(p256dh),
+                auth_token = VALUES(auth_token), timezone = VALUES(timezone), enabled = 1,
+                updated_at = UTC_TIMESTAMP()'
+        );
+        $statement->execute([
+            $user['id'], hash('sha256', $subscription['endpoint']), $subscription['endpoint'],
+            $subscription['keys']['p256dh'], $subscription['keys']['auth'], $timezone,
+        ]);
+        respond(200, ['ok' => true]);
+    }
+
+    if ($method === 'DELETE' && $path === '/api/push/subscribe') {
+        $body = read_json_body();
+        $endpoint = $body['endpoint'] ?? null;
+        if (!is_string($endpoint) || $endpoint === '' || strlen($endpoint) > 2048) {
+            respond(400, ['error' => 'INVALID_PUSH_SUBSCRIPTION']);
+        }
+        $statement = $pdo->prepare(
+            'DELETE FROM moi30_push_subscriptions WHERE user_id = ? AND endpoint_hash = ?'
+        );
+        $statement->execute([$user['id'], hash('sha256', $endpoint)]);
+        http_response_code(204);
+        exit;
+    }
+
     if ($method === 'GET' && $path === '/api/state') {
         if ((bool)$user['must_change_password']) {
             respond(403, ['error' => 'PASSWORD_CHANGE_REQUIRED']);
@@ -345,7 +433,47 @@ function require_auth(PDO $pdo): array
         clear_session_cookie();
         respond(401, ['error' => 'AUTH_REQUIRED']);
     }
+    $seen = $pdo->prepare('UPDATE moi30_users SET last_seen_at = UTC_TIMESTAMP() WHERE id = ?');
+    $seen->execute([$user['id']]);
     return ['user' => $user, 'token_hash' => $tokenHash];
+}
+
+function push_is_configured(array $config): bool
+{
+    $push = $config['push'] ?? [];
+    return is_array($push)
+        && is_string($push['subject'] ?? null) && $push['subject'] !== ''
+        && is_string($push['publicKey'] ?? null) && $push['publicKey'] !== ''
+        && is_string($push['privateKey'] ?? null) && $push['privateKey'] !== '';
+}
+
+function valid_push_subscription(mixed $value): ?array
+{
+    if (!is_array($value) || !is_string($value['endpoint'] ?? null)
+        || strlen($value['endpoint']) < 10 || strlen($value['endpoint']) > 2048
+        || !filter_var($value['endpoint'], FILTER_VALIDATE_URL)
+        || strtolower((string)parse_url($value['endpoint'], PHP_URL_SCHEME)) !== 'https'
+        || !is_array($value['keys'] ?? null)
+        || !is_string($value['keys']['p256dh'] ?? null)
+        || !is_string($value['keys']['auth'] ?? null)
+        || preg_match('/^[A-Za-z0-9_-]{40,255}$/', $value['keys']['p256dh']) !== 1
+        || preg_match('/^[A-Za-z0-9_-]{12,255}$/', $value['keys']['auth']) !== 1) {
+        return null;
+    }
+    return [
+        'endpoint' => $value['endpoint'],
+        'keys' => ['p256dh' => $value['keys']['p256dh'], 'auth' => $value['keys']['auth']],
+    ];
+}
+
+function valid_timezone(mixed $value): string
+{
+    if (!is_string($value) || strlen($value) > 64) {
+        return 'UTC';
+    }
+    static $known = null;
+    $known ??= array_fill_keys(timezone_identifiers_list(), true);
+    return isset($known[$value]) ? $value : 'UTC';
 }
 
 function issue_session(PDO $pdo, array $config, string $userId): void

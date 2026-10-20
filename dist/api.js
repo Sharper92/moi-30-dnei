@@ -30,6 +30,9 @@
     changePassword: (currentPassword, newPassword) => request('/api/auth/change-password', { method: 'POST', body: { currentPassword, newPassword } }),
     loadState: () => request('/api/state'),
     saveState: (state, revision) => request('/api/state', { method: 'PUT', body: { state, revision } }),
+    pushConfig: () => request('/api/push/config'),
+    subscribePush: (subscription, timezone) => request('/api/push/subscribe', { method: 'POST', body: { subscription, timezone } }),
+    unsubscribePush: (endpoint) => request('/api/push/subscribe', { method: 'DELETE', body: { endpoint } }),
     ApiError
   };
 

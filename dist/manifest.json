@@ -2,6 +2,7 @@
   "name":"Мои 30 дней — путь к себе",
   "short_name":"Мои 30 дней",
   "description":"Бережный трекер привычек с ростом дерева и наградами",
+  "id":"/",
   "start_url":"./index.html",
   "scope":"./",
   "display":"standalone",

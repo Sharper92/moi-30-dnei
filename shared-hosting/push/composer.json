@@ -1,0 +1,16 @@
+{
+  "name": "moi-30-dnei/push-worker",
+  "description": "Scheduled Web Push delivery for Мои 30 дней",
+  "private": true,
+  "require": {
+    "php": ">=8.2",
+    "minishlink/web-push": "^10.0",
+    "guzzlehttp/guzzle": "^7.9"
+  },
+  "config": {
+    "allow-plugins": {
+      "php-http/discovery": true
+    },
+    "sort-packages": true
+  }
+}
