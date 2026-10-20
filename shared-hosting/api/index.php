@@ -524,6 +524,40 @@ function route_request(PDO $pdo, array $config): never
         }
     }
 
+    if ($method === 'PUT' && preg_match('#^/api/admin/users/([0-9a-f-]{36})$#', $path, $match) === 1) {
+        require_admin($user);
+        enforce_rate_limit($pdo, 'admin-update-user');
+        $body = read_json_body();
+        $displayName = $body['displayName'] ?? null;
+        $username = $body['username'] ?? null;
+        if (!valid_display_name($displayName)) {
+            respond(400, ['error' => 'INVALID_DISPLAY_NAME']);
+        }
+        if (!valid_username($username)) {
+            respond(400, ['error' => 'INVALID_USERNAME']);
+        }
+        $target = $pdo->prepare("SELECT id FROM moi30_users WHERE id = ? AND role = 'user'");
+        $target->execute([$match[1]]);
+        if (!$target->fetch()) {
+            respond(404, ['error' => 'USER_NOT_FOUND']);
+        }
+        try {
+            $statement = $pdo->prepare(
+                "UPDATE moi30_users SET display_name = ?, username = ?, username_key = ?, updated_at = UTC_TIMESTAMP()
+                 WHERE id = ? AND role = 'user'"
+            );
+            $statement->execute([
+                trim((string)$displayName), trim((string)$username), username_key((string)$username), $match[1],
+            ]);
+        } catch (PDOException $error) {
+            if ((string)$error->getCode() === '23000') {
+                respond(409, ['error' => 'USERNAME_TAKEN']);
+            }
+            throw $error;
+        }
+        respond(200, ['user' => public_user(find_user_by_id($pdo, $match[1]))]);
+    }
+
     if ($method === 'DELETE' && preg_match('#^/api/admin/users/([0-9a-f-]{36})$#', $path, $match) === 1) {
         require_admin($user);
         $statement = $pdo->prepare("DELETE FROM moi30_users WHERE id = ? AND role = 'user'");

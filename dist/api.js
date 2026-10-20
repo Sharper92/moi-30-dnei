@@ -38,6 +38,7 @@
     unsubscribePush: (endpoint) => request('/api/push/subscribe', { method: 'DELETE', body: { endpoint } }),
     adminOverview: () => request('/api/admin/overview'),
     adminCreateUser: (username) => request('/api/admin/users', { method: 'POST', body: { username } }),
+    adminUpdateUser: (userId, displayName, username) => request(`/api/admin/users/${encodeURIComponent(userId)}`, { method: 'PUT', body: { displayName, username } }),
     adminResetPassword: (userId) => request(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, { method: 'POST' }),
     adminDeleteUser: (userId) => request(`/api/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
     adminSavePushSettings: (settings) => request('/api/admin/push-settings', { method: 'PUT', body: settings }),

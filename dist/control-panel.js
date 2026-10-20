@@ -39,10 +39,12 @@
       <div class="admin-user">
         <div class="admin-user-main"><strong>${escapeHtml(user.displayName || user.username)}</strong>
           <small>Логин: ${escapeHtml(user.username)}</small>
+          <small>ID: ${escapeHtml(user.id)}</small>
           <small>Последний вход: ${escapeHtml(dateText(user.lastSeenAt))}</small>
           <small>${user.pushDevices ? `Push: ${user.pushDevices} ${user.pushDevices === 1 ? 'устройство' : 'устройства'}` : 'Push не подключён'}${user.mustChangePassword ? ' · ждёт смены пароля' : ''}</small>
         </div>
         <div class="admin-user-actions">
+          <button class="btn-outline btn-small" type="button" data-admin-edit="${escapeHtml(user.id)}" data-admin-display="${escapeHtml(user.displayName || user.username)}" data-admin-login="${escapeHtml(user.username)}">Изменить</button>
           <button class="btn-outline btn-small" type="button" data-admin-reset="${escapeHtml(user.id)}" data-admin-name="${escapeHtml(user.username)}">Сбросить пароль</button>
           <button class="btn-danger btn-small" type="button" data-admin-delete="${escapeHtml(user.id)}" data-admin-name="${escapeHtml(user.username)}">Удалить</button>
         </div>
@@ -119,6 +121,43 @@
     }
   }
 
+  function editUser(button) {
+    const id = button.dataset.adminEdit;
+    const shade = $('modal-container');
+    shade.innerHTML = `<div class="modal-overlay" id="admin-user-modal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-user-modal-title">
+      <div class="modal-title" id="admin-user-modal-title">Изменить пользователя</div>
+      <p class="modal-sub">Постоянный ID и весь прогресс останутся прежними.</p>
+      <form id="admin-user-edit-form">
+        <label class="admin-field">Имя<input id="admin-user-display" class="name-input" minlength="1" maxlength="64" required value="${escapeHtml(button.dataset.adminDisplay)}"></label>
+        <label class="admin-field">Логин<input id="admin-user-login" class="name-input" minlength="3" maxlength="32" required value="${escapeHtml(button.dataset.adminLogin)}"></label>
+        <span class="profile-id">ID: ${escapeHtml(id)}</span>
+        <div id="admin-user-edit-error" class="admin-error"></div>
+        <div class="button-row" style="justify-content:flex-end"><button id="admin-user-edit-cancel" class="btn-outline" type="button">Отмена</button><button id="admin-user-edit-save" class="btn" type="submit">Сохранить</button></div>
+      </form></div></div>`;
+    const close = () => { shade.innerHTML = ''; };
+    $('admin-user-edit-cancel').addEventListener('click', close);
+    $('admin-user-modal').addEventListener('click', event => { if (event.target.id === 'admin-user-modal') close(); });
+    $('admin-user-edit-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const save = $('admin-user-edit-save');
+      $('admin-user-edit-error').textContent = '';
+      save.disabled = true;
+      try {
+        await api.adminUpdateUser(id, $('admin-user-display').value.trim(), $('admin-user-login').value.trim());
+        close();
+        toast('Данные пользователя изменены');
+        await load();
+      } catch (error) {
+        $('admin-user-edit-error').textContent = error?.code === 'USERNAME_TAKEN'
+          ? 'Такой логин уже занят.' : error?.code === 'INVALID_DISPLAY_NAME'
+            ? 'Имя должно содержать от 1 до 64 символов.' : error?.code === 'INVALID_USERNAME'
+              ? 'Логин: от 3 до 32 букв, цифр или символов _ . -' : 'Не удалось сохранить изменения.';
+        save.disabled = false;
+      }
+    });
+    $('admin-user-display').focus();
+  }
+
   async function resetPassword(button) {
     const username = button.dataset.adminName;
     if (!confirm(`Сбросить пароль пользователя «${username}»? На всех его устройствах будет выполнен выход.`)) return;
@@ -192,6 +231,8 @@
     $('admin-push-settings-form').addEventListener('submit', saveSettings);
     $('admin-push-form').addEventListener('submit', sendPush);
     $('admin-users').addEventListener('click', event => {
+      const editButton = event.target.closest('[data-admin-edit]');
+      if (editButton) { editUser(editButton); return; }
       const resetButton = event.target.closest('[data-admin-reset]');
       if (resetButton) { resetPassword(resetButton); return; }
       const deleteButton = event.target.closest('[data-admin-delete]');
